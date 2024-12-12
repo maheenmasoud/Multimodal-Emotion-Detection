@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import time
 import speech_recognition as sr
+from gtts import gTTS
+import os
 
 def capture_image(camera, count):
     print("Capturing image...")
@@ -40,6 +42,19 @@ def record_audio(count, camera):
 def predict_emotion_live(image_path, text, model):
     return "Happy"  #placeholder
 
+def output_result(emotion):
+    language = 'en'
+    if emotion:
+        tts = gTTS(text=f"You are {emotion}", lang=language, slow=False)
+        tts.save("output.mp3")
+        print(f"The predicted emotion is {emotion}")
+    else:
+        print("No emotion detected.")
+        tts = gTTS(text="No emotion detected.", lang=language, slow=False)
+        tts.save("output.mp3")
+
+    os.system("afplay output.mp3")
+
 def live_emotion_detection(interval=5, model=None,):
     count = 0
     camera = cv2.VideoCapture(0)
@@ -60,6 +75,8 @@ def live_emotion_detection(interval=5, model=None,):
             # Wait for 'q' key to quit
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
+            output_result(emotion)
             time.sleep(interval)
 
     except KeyboardInterrupt:
