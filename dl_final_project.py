@@ -22,6 +22,11 @@ class ImageModel(nn.Module):
     def __init__(self):
         super(ImageModel, self).__init__()
         self.resnet = models.resnet18(pretrained=True)
+
+        # Change the last layer
+        for param in self.resnet.parameters():
+            param.requires_grad = False
+
         self.resnet.fc = nn.Linear(self.resnet.fc.in_features, 128)
 
     def forward(self, x):
@@ -32,6 +37,11 @@ class TextModel(nn.Module):
     def __init__(self):
         super(TextModel, self).__init__()
         self.bert = BertModel.from_pretrained('bert-base-uncased')
+
+        # Change the last layer
+        for param in self.bert.parameters():
+            param.requires_grad = False
+
         self.fc = nn.Linear(self.bert.config.hidden_size, 128)
 
     def forward(self, input_ids, attention_mask):
@@ -101,6 +111,7 @@ class MultimodalDataset(Dataset):
         self.tokenizer = tokenizer
         self.transform = transform
         self.folder_path = folder_path
+        self.labels = {'neutral': 0, 'joy': 1, 'sadness': 2, 'fear': 3, 'anger': 4, 'surprise': 5, 'disgust': 6}
 
     def __len__(self):
         return len(self.data)
@@ -109,15 +120,21 @@ class MultimodalDataset(Dataset):
         row = self.data.iloc[idx]
         
         text = row['Utterance']
-        label = row['Emotion']
+        label = self.labels[row['Emotion']]
+        # print(text, type(text))
+        # print(label, type(label))
+        # print(f"dia{row['Dialogue_ID']}_utt{row['Utterance_ID']}.jpg")
+        if type(text) != str:
+            text = ""
 
         # path for image file
         image_path = f"{self.folder_path}/dia{row['Dialogue_ID']}_utt{row['Utterance_ID']}.jpg"
         image = Image.open(image_path).convert('RGB')
+        #print(f"dia{row['Dialogue_ID']}_utt{row['Utterance_ID']}")
 
         # Process image
         image = self.transform(image)
-
+    
         # Process text
         input_ids, attention_mask = preprocess_text(text, tokenizer=self.tokenizer)
 
@@ -170,7 +187,7 @@ def preprocess_text(text, tokenizer):
     encoded = tokenizer(text, padding='max_length', max_length=50, truncation=True, return_tensors="pt") # could change max_length based on the data
     return encoded['input_ids'].squeeze(0), encoded['attention_mask'].squeeze(0)
 
-def train_model(test_dataloader, validation_dataloader):
+def train_model(train_dataloader, validation_dataloader):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = MultimodalModel().to(device)
     optimizer = Adam(model.parameters(), lr=1e-3)
@@ -180,25 +197,26 @@ def train_model(test_dataloader, validation_dataloader):
     val_loss = []
 
     model.train()
-    for epoch in range(5):
+    for epoch in range(50):
         total_loss = 0
-        for batch in test_dataloader:
+        for i, batch in enumerate(train_dataloader):
+            print(f"Batch {i}")
             image = batch['image'].to(device)
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['label'].to(device)
             
             optimizer.zero_grad()
-            outputs = model(image, input_ids, attention_mask)
+            outputs = model(input_ids, attention_mask, image)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
         
-        train_loss.append(total_loss / len(test_dataloader))
+        train_loss.append(total_loss / len(train_dataloader))
 
-        print(f"Epoch {epoch+1}, Loss: {total_loss / len(test_dataloader)}")
+        print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_dataloader)}")
 
         accuracy, avg_loss = evaluate_model(validation_dataloader, model, device)
         val_loss.append(avg_loss)
@@ -230,7 +248,7 @@ def evaluate_model(dataloader, model, device):
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['label'].to(device)
 
-            outputs = model(image, input_ids, attention_mask)
+            outputs = model(input_ids, attention_mask, image)
             loss = criterion(outputs, labels)
             total_loss += loss.item()
 
