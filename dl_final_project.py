@@ -27,7 +27,10 @@ class ImageModel(nn.Module):
         for param in self.resnet.parameters():
             param.requires_grad = False
 
-        self.resnet.fc = nn.Linear(self.resnet.fc.in_features, 128)
+        for param in self.resnet.layer4.parameters():
+            param.requires_grad = True
+
+        self.resnet.fc = nn.Sequential(nn.Dropout(0.3), nn.Linear(512, 128), nn.ReLU())
 
     def forward(self, x):
         return self.resnet(x)
@@ -42,7 +45,10 @@ class TextModel(nn.Module):
         for param in self.bert.parameters():
             param.requires_grad = False
 
-        self.fc = nn.Linear(self.bert.config.hidden_size, 128)
+        for param in self.bert.encoder.layer[-2:].parameters():
+            param.requires_grad = True
+
+        self.fc = nn.Sequential(nn.Dropout(0.3), nn.Linear(768, 128), nn.ReLU())
 
     def forward(self, input_ids, attention_mask):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
@@ -163,10 +169,19 @@ def get_data():
 
     # Image preprocessing
     transform = transforms.Compose([
-            SquarePad(),
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        SquarePad(),
+        transforms.Resize((128, 128)),
+
+        # Data augmentation transformations
+        transforms.RandomHorizontalFlip(p=0.5),  # Randomly flip image horizontally
+        transforms.RandomRotation(degrees=15),   # Random rotation up to 15 degrees
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # Color jitter
+        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # Random translation
+        transforms.RandomResizedCrop(size=128, scale=(0.8, 1.0)),  # Random crop and resize
+
+
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
 
     # Text preprocessing
@@ -190,14 +205,27 @@ def preprocess_text(text, tokenizer):
 def train_model(train_dataloader, validation_dataloader):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = MultimodalModel().to(device)
-    optimizer = Adam(model.parameters(), lr=1e-3)
+
+    optimizer = Adam([
+    # ResNet layers
+    {'params': model.image_model.resnet.layer4.parameters(), 'lr': 1e-5},
+    {'params': model.image_model.resnet.fc.parameters(), 'lr': 1e-4},
+
+    # BERT layers
+    {'params': model.text_model.bert.encoder.layer[-2:].parameters(), 'lr': 1e-5},
+    {'params': model.text_model.fc.parameters(), 'lr': 1e-4},
+
+    # Fusion classifier
+    {'params': model.classifier.parameters(), 'lr': 1e-4}
+], weight_decay=1e-5)
+    
     criterion = CrossEntropyLoss()
 
     train_loss = []
     val_loss = []
 
     model.train()
-    for epoch in range(50):
+    for epoch in range(2):
         total_loss = 0
         for i, batch in enumerate(train_dataloader):
             print(f"Batch {i}")
