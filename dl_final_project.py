@@ -16,6 +16,8 @@ from transformers import BertModel
 from torchvision import models
 from PIL import Image
 from torchvision.transforms.functional import pad
+from transformers import AdamW
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
 
 # ResNet Model
 class ImageModel(nn.Module):
@@ -28,6 +30,8 @@ class ImageModel(nn.Module):
             param.requires_grad = False
 
         for param in self.resnet.layer4.parameters():
+            param.requires_grad = True
+        for param in self.resnet.layer3.parameters():
             param.requires_grad = True
 
         self.resnet.fc = nn.Sequential(nn.Dropout(0.3), nn.Linear(512, 128), nn.ReLU())
@@ -45,7 +49,7 @@ class TextModel(nn.Module):
         for param in self.bert.parameters():
             param.requires_grad = False
 
-        for param in self.bert.encoder.layer[-2:].parameters():
+        for param in self.bert.encoder.layer[-4:].parameters():
             param.requires_grad = True
 
         self.fc = nn.Sequential(nn.Dropout(0.3), nn.Linear(768, 128), nn.ReLU())
@@ -61,7 +65,7 @@ class MultimodalModel(nn.Module):
         super(MultimodalModel, self).__init__()
         self.image_model = ImageModel()
         self.text_model = TextModel()
-        self.classifier = nn.Linear(256, 7)
+        self.classifier = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 7))
 
     def forward(self, input_ids, attention_mask, images):
         image_features = self.image_model(images)
@@ -206,18 +210,19 @@ def train_model(train_dataloader, validation_dataloader):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = MultimodalModel().to(device)
 
-    optimizer = Adam([
-    # ResNet layers
-    {'params': model.image_model.resnet.layer4.parameters(), 'lr': 1e-5},
-    {'params': model.image_model.resnet.fc.parameters(), 'lr': 1e-4},
+    optimizer = AdamW([
+        # ResNet layers
+        {'params': model.image_model.resnet.layer3.parameters(), 'lr': 1e-5},
+        {'params': model.image_model.resnet.layer4.parameters(), 'lr': 1e-5},
+        {'params': model.image_model.resnet.fc.parameters(), 'lr': 1e-4},
 
-    # BERT layers
-    {'params': model.text_model.bert.encoder.layer[-2:].parameters(), 'lr': 1e-5},
-    {'params': model.text_model.fc.parameters(), 'lr': 1e-4},
+        # BERT layers
+        {'params': model.text_model.bert.encoder.layer[-4:].parameters(), 'lr': 1e-5},
+        {'params': model.text_model.fc.parameters(), 'lr': 1e-4},
 
-    # Fusion classifier
-    {'params': model.classifier.parameters(), 'lr': 1e-4}
-], weight_decay=1e-5)
+        # Fusion classifier
+        {'params': model.classifier.parameters(), 'lr': 1e-4}
+    ], weight_decay=1e-5)
     
     criterion = CrossEntropyLoss()
 
@@ -288,8 +293,19 @@ def evaluate_model(dataloader, model, device):
             true_labels.extend(labels.cpu().numpy())
 
     accuracy = correct_predictions / total_samples
+    confusion = confusion_matrix(true_labels, predictions)
+    print(f"Confusion Matrix: {confusion}")
+    f1_scores = f1_score(true_labels, predictions, average=None)
+    print(f"F1 Scores: {f1_scores}")
+    precision_scores = precision_score(true_labels, predictions, average=None)
+    print(f"Precision Scores: {precision_scores}")
+    recall_scores = recall_score(true_labels, predictions, average=None)
+    print(f"Recall Scores: {recall_scores}")
+    classifcation_report = classification_report(true_labels, predictions)
+    print(f"Classification Report: {classifcation_report}")
     avg_loss = total_loss / len(dataloader)
     print(f"Validation Loss: {total_loss / len(dataloader)}, Accuracy: {accuracy}")
+
     return accuracy, avg_loss
 
 def main():
