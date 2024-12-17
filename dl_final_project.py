@@ -222,7 +222,7 @@ def train_model(train_dataloader, validation_dataloader, criterion):
     best_loss = float('inf')
 
     model.train()
-    for epoch in range(2):
+    for epoch in range(30):
         total_loss = 0
         for i, batch in enumerate(train_dataloader):
             print(f"Batch {i}")
