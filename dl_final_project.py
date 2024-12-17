@@ -35,7 +35,7 @@ class ImageModel(nn.Module):
         for param in self.resnet.layer3.parameters():
             param.requires_grad = True
 
-        self.resnet.fc = nn.Sequential(nn.Dropout(0.3), nn.Linear(512, 128), nn.ReLU())
+        self.resnet.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(512, 128), nn.ReLU())
 
     def forward(self, x):
         return self.resnet(x)
@@ -50,10 +50,10 @@ class TextModel(nn.Module):
         for param in self.bert.parameters():
             param.requires_grad = False
 
-        for param in self.bert.encoder.layer[-4:].parameters():
+        for param in self.bert.encoder.layer[-2:].parameters():
             param.requires_grad = True
 
-        self.fc = nn.Sequential(nn.Dropout(0.3), nn.Linear(768, 128), nn.ReLU())
+        self.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(768, 128), nn.ReLU())
 
     def forward(self, input_ids, attention_mask):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
@@ -73,6 +73,8 @@ class MultimodalModel(nn.Module):
 
         self.classifier = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 7))
 
+        self.dropout = nn.Dropout(0.5)
+
     def forward(self, input_ids, attention_mask, images):
         image_features = self.image_model(images)
         text_features = self.text_model(input_ids, attention_mask)
@@ -86,7 +88,6 @@ class MultimodalModel(nn.Module):
         # Weighted sum of image and text features
         fused_features = alpha_image * image_features + alpha_text * text_features
         return self.classifier(fused_features)
-
 
 class MultimodalDataset(Dataset):
     def __init__(self, data, transform, tokenizer, folder_path):
@@ -126,7 +127,6 @@ class MultimodalDataset(Dataset):
 
         return {'image': image, 'input_ids': input_ids, 'attention_mask': attention_mask, 'label': label}
     
-
 class SquarePad:
     def __call__(self, image):
         width, height = image.size
@@ -168,7 +168,6 @@ def get_data():
         transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # Random translation
         transforms.RandomResizedCrop(size=128, scale=(0.8, 1.0)),  # Random crop and resize
 
-
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
@@ -197,20 +196,24 @@ def train_model(train_dataloader, validation_dataloader, criterion):
 
     optimizer = AdamW([
         # ResNet layers
-        {'params': model.image_model.resnet.layer3.parameters(), 'lr': 1e-5},
-        {'params': model.image_model.resnet.layer4.parameters(), 'lr': 1e-5},
+        {'params': model.image_model.resnet.layer3.parameters(), 'lr': 1e-6},
+        {'params': model.image_model.resnet.layer4.parameters(), 'lr': 1e-6},
         {'params': model.image_model.resnet.fc.parameters(), 'lr': 1e-4},
 
         # BERT layers
-        {'params': model.text_model.bert.encoder.layer[-4:].parameters(), 'lr': 1e-5},
+        {'params': model.text_model.bert.encoder.layer[-4:].parameters(), 'lr': 1e-6},
         {'params': model.text_model.fc.parameters(), 'lr': 1e-4},
 
         # Fusion classifier
         {'params': model.classifier.parameters(), 'lr': 1e-4}
-    ], weight_decay=1e-5)
+    ], weight_decay=1e-4)
     
     train_loss = []
     val_loss = []
+    patience = 5
+    count = 0
+    best_model = None
+    best_loss = float('inf')
 
     model.train()
     for epoch in range(2):
@@ -236,6 +239,16 @@ def train_model(train_dataloader, validation_dataloader, criterion):
 
         accuracy, avg_loss = evaluate_model(validation_dataloader, model, device, criterion)
         val_loss.append(avg_loss)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_model = model
+            count = 0
+        else:
+            count += 1
+
+        if count >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
 
     plot_results(train_loss, val_loss)
 
