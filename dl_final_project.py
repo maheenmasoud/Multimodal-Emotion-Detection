@@ -18,6 +18,7 @@ from PIL import Image
 from torchvision.transforms.functional import pad
 from transformers import AdamW
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
+from sklearn.utils.class_weight import compute_class_weight
 
 # ResNet Model
 class ImageModel(nn.Module):
@@ -65,54 +66,26 @@ class MultimodalModel(nn.Module):
         super(MultimodalModel, self).__init__()
         self.image_model = ImageModel()
         self.text_model = TextModel()
-        self.classifier = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 7))
+
+        # Attention mechanism
+        self.attention_fc = nn.Linear(256, 2)  # Output attention weights for image and text
+        self.softmax = nn.Softmax(dim=1)
+
+        self.classifier = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 7))
 
     def forward(self, input_ids, attention_mask, images):
         image_features = self.image_model(images)
         text_features = self.text_model(input_ids, attention_mask)
+
         combined_features = torch.cat((image_features, text_features), dim=1)
-        return self.classifier(combined_features)
+        attention_weights = self.softmax(self.attention_fc(combined_features))
 
-# class MultimodalEmotionModel(torch.nn.Module):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-#         # Image branch
-#         self.image_branch = nn.Sequential(
-#             nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-#             nn.ReLU(),
-#             nn.MaxPool2d(2),
-#             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-#             nn.ReLU(),
-#             nn.MaxPool2d(2),
-#             nn.Flatten(),
-#             nn.Linear(32 * 32 * 32, 256),
-#             nn.ReLU()
-#         )
+        # Split attention weights
+        alpha_image, alpha_text = attention_weights[:, 0].unsqueeze(1), attention_weights[:, 1].unsqueeze(1)
 
-#         # Text branch
-#         self.text_branch = DistilBertModel.from_pretrained('distilbert-base-uncased')
-#         self.text_fc = nn.Linear(768, 256)
-
-#         # Combined branch
-#         self.fc = nn.Sequential(
-#             nn.Linear(512, 128),
-#             nn.ReLU(),
-#             nn.Linear(128, 7)  # Assuming 7 emotion classes
-#         )
-
-#     def forward(self, image, input_ids, attention_mask):
-#         # Image path
-#         image_features = self.image_branch(image)
-
-#         # Text path
-#         text_features = self.text_branch(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state[:, 0, :]
-#         text_features = self.text_fc(text_features)
-
-#         # Combine
-#         combined = torch.cat((image_features, text_features), dim=1)
-#         output = self.fc(combined)
-
-#         return output
+        # Weighted sum of image and text features
+        fused_features = alpha_image * image_features + alpha_text * text_features
+        return self.classifier(fused_features)
 
 
 class MultimodalDataset(Dataset):
@@ -164,12 +137,24 @@ class SquarePad:
         bottom = max_dim - height - top
         return pad(image, (left, top, right, bottom), fill=0, padding_mode='constant')
 
+def compute_weights(data):
+    labels = data['Emotion'].map({
+        'neutral': 0, 'joy': 1, 'sadness': 2, 
+        'fear': 3, 'anger': 4, 'surprise': 5, 'disgust': 6
+    }).values
+    class_weights = compute_class_weight('balanced', classes=np.unique(labels), y=labels)
+    return torch.tensor(class_weights, dtype=torch.float)
 
 def get_data():
     train_data = pd.read_csv('Archive/combinedTrainData/trainMELD.csv', encoding='latin1')
     validation_data = pd.read_csv('Archive/combinedValData/valMELD.csv', encoding='latin1')
     print(f"Train data shape: {train_data.shape}")
     print(f"Validation data shape: {validation_data.shape}")
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    class_weights = compute_weights(train_data).to(device)
+    criterion = CrossEntropyLoss(weight=class_weights)
 
     # Image preprocessing
     transform = transforms.Compose([
@@ -200,13 +185,13 @@ def get_data():
     train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     validation_dataloader = DataLoader(validation_dataset, batch_size=32, shuffle=False)
 
-    return train_dataloader, validation_dataloader
+    return train_dataloader, validation_dataloader, criterion
 
 def preprocess_text(text, tokenizer):
     encoded = tokenizer(text, padding='max_length', max_length=50, truncation=True, return_tensors="pt") # could change max_length based on the data
     return encoded['input_ids'].squeeze(0), encoded['attention_mask'].squeeze(0)
 
-def train_model(train_dataloader, validation_dataloader):
+def train_model(train_dataloader, validation_dataloader, criterion):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = MultimodalModel().to(device)
 
@@ -224,8 +209,6 @@ def train_model(train_dataloader, validation_dataloader):
         {'params': model.classifier.parameters(), 'lr': 1e-4}
     ], weight_decay=1e-5)
     
-    criterion = CrossEntropyLoss()
-
     train_loss = []
     val_loss = []
 
@@ -251,7 +234,7 @@ def train_model(train_dataloader, validation_dataloader):
 
         print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_dataloader)}")
 
-        accuracy, avg_loss = evaluate_model(validation_dataloader, model, device)
+        accuracy, avg_loss = evaluate_model(validation_dataloader, model, device, criterion)
         val_loss.append(avg_loss)
 
     plot_results(train_loss, val_loss)
@@ -264,12 +247,11 @@ def plot_results(train_loss, val_loss):
     plt.ylabel('Loss')
     plt.show() 
 
-def evaluate_model(dataloader, model, device):
+def evaluate_model(dataloader, model, device, criterion):
     model.eval()
     total_loss = 0
     correct_predictions = 0
     total_samples = 0
-    criterion = CrossEntropyLoss()
 
     predictions = []
     true_labels = []
@@ -309,8 +291,8 @@ def evaluate_model(dataloader, model, device):
     return accuracy, avg_loss
 
 def main():
-    train_dataloader, validation_dataset = get_data()
-    train_model(train_dataloader, validation_dataset)
+    train_dataloader, validation_dataset, criterion = get_data()
+    train_model(train_dataloader, validation_dataset, criterion)
 
 if __name__ == '__main__':
     main()
