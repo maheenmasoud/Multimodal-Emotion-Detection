@@ -71,7 +71,8 @@ class MultimodalModel(nn.Module):
         self.attention_fc = nn.Linear(256, 2)  # Output attention weights for image and text
         self.softmax = nn.Softmax(dim=1)
 
-        self.classifier = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 7))
+        self.attention_dropout = nn.Dropout(0.5)
+        self.classifier = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Dropout(0.5), nn.Linear(128, 7))
 
         self.dropout = nn.Dropout(0.5)
 
@@ -87,6 +88,9 @@ class MultimodalModel(nn.Module):
 
         # Weighted sum of image and text features
         fused_features = alpha_image * image_features + alpha_text * text_features
+
+        # dropout layer
+        fused_features = self.attention_dropout(fused_features)
         return self.classifier(fused_features)
 
 class MultimodalDataset(Dataset):
