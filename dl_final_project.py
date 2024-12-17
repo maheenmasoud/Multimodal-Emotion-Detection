@@ -78,7 +78,9 @@ class MultimodalModel(nn.Module):
 
     def forward(self, input_ids, attention_mask, images):
         image_features = self.image_model(images)
+        image_features = self.dropout(image_features)
         text_features = self.text_model(input_ids, attention_mask)
+        text_features = self.dropout(text_features)
 
         combined_features = torch.cat((image_features, text_features), dim=1)
         attention_weights = self.softmax(self.attention_fc(combined_features))
