@@ -35,7 +35,7 @@ class ImageModel(nn.Module):
         for param in self.resnet.layer3.parameters():
             param.requires_grad = True
 
-        self.resnet.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(512, 128), nn.ReLU())
+        self.resnet.fc = nn.Sequential(nn.Dropout(0.6), nn.Linear(512, 128), nn.ReLU())
 
     def forward(self, x):
         return self.resnet(x)
@@ -53,7 +53,7 @@ class TextModel(nn.Module):
         for param in self.bert.encoder.layer[-2:].parameters():
             param.requires_grad = True
 
-        self.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(768, 128), nn.ReLU())
+        self.fc = nn.Sequential(nn.Dropout(0.6), nn.Linear(768, 128), nn.ReLU())
 
     def forward(self, input_ids, attention_mask):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
@@ -62,7 +62,7 @@ class TextModel(nn.Module):
     
 # Fusion Model
 class MultimodalModel(nn.Module):
-    def __init__(self):
+    def __init__(self, image_dim=128, text_dim=128, num_heads=4, fusion_dim=256):
         super(MultimodalModel, self).__init__()
         self.image_model = ImageModel()
         self.text_model = TextModel()
@@ -71,10 +71,15 @@ class MultimodalModel(nn.Module):
         self.attention_fc = nn.Linear(256, 2)  # Output attention weights for image and text
         self.softmax = nn.Softmax(dim=1)
 
-        self.attention_dropout = nn.Dropout(0.5)
-        self.classifier = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Dropout(0.5), nn.Linear(128, 7))
+        self.image_projection = nn.Linear(image_dim, fusion_dim)
+        self.text_projection = nn.Linear(text_dim, fusion_dim)
 
-        self.dropout = nn.Dropout(0.5)
+        self.multihead_attention = nn.MultiheadAttention(embed_dim=fusion_dim, num_heads=num_heads, dropout=0.6, batch_first=True)
+
+        self.attention_dropout = nn.Dropout(0.6)
+        self.classifier = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.6), nn.Linear(128, 7))
+
+        self.dropout = nn.Dropout(0.6)
 
     def forward(self, input_ids, attention_mask, images):
         image_features = self.image_model(images)
@@ -82,19 +87,34 @@ class MultimodalModel(nn.Module):
         text_features = self.text_model(input_ids, attention_mask)
         text_features = self.dropout(text_features)
 
-        combined_features = torch.cat((image_features, text_features), dim=1)
-        attention_weights = self.softmax(self.attention_fc(combined_features))
+        image_features_proj = self.image_projection(image_features).unsqueeze(1)  # Add sequence dimension: (batch_size, 1, fusion_dim)
+        text_features_proj = self.text_projection(text_features).unsqueeze(1)    # Shape: (batch_size, 1, fusion_dim)
 
-        # Split attention weights
-        alpha_image, alpha_text = attention_weights[:, 0].unsqueeze(1), attention_weights[:, 1].unsqueeze(1)
+        # combined_features = torch.cat((image_features, text_features), dim=1)
+        # attention_weights = self.softmax(self.attention_fc(combined_features))
 
-        # Weighted sum of image and text features
-        fused_features = alpha_image * image_features + alpha_text * text_features
+        # # Split attention weights
+        # alpha_image, alpha_text = attention_weights[:, 0].unsqueeze(1), attention_weights[:, 1].unsqueeze(1)
 
-        # dropout layer
-        fused_features = self.attention_dropout(fused_features)
-        return self.classifier(fused_features)
+        # # Weighted sum of image and text features
+        # fused_features = alpha_image * image_features + alpha_text * text_features
 
+        # # dropout layer
+        # fused_features = self.attention_dropout(fused_features)
+
+        # return self.classifier(fused_features)
+
+        combined_features = torch.cat((image_features_proj, text_features_proj), dim=1)  # Shape: (batch_size, 2, fusion_dim)
+        
+        attn_output, _ = self.multihead_attention(combined_features, combined_features, combined_features)
+        
+        # Aggregate the attended features (e.g., mean pooling across sequence length)
+        fused_features = attn_output.mean(dim=1)  # Shape: (batch_size, fusion_dim)
+        
+        # Classification
+        output = self.classifier(fused_features)
+
+        return output
 class MultimodalDataset(Dataset):
     def __init__(self, data, transform, tokenizer, folder_path):
         self.data = data
@@ -145,15 +165,19 @@ class SquarePad:
 
 def compute_weights(data):
     labels = data['Emotion'].map({
-        'neutral': 0, 'joy': 1, 'sadness': 2, 
+        'neutral': 0, 'joy': 1, 'sadness': 2,
         'fear': 3, 'anger': 4, 'surprise': 5, 'disgust': 6
     }).values
     class_weights = compute_class_weight('balanced', classes=np.unique(labels), y=labels)
     return torch.tensor(class_weights, dtype=torch.float)
 
 def get_data():
-    train_data = pd.read_csv('Archive/combinedTrainData/trainMELD.csv', encoding='latin1')
-    validation_data = pd.read_csv('Archive/combinedValData/valMELD.csv', encoding='latin1')
+    #train_data = pd.read_csv('Archive/combinedTrainData/trainMELD.csv', encoding='latin1')
+    #validation_data = pd.read_csv('Archive/combinedValData/valMELD.csv', encoding='latin1')
+
+    validation_data = pd.read_csv('Archive/combinedTrainData/trainMELD.csv', encoding='latin1')
+    train_data = pd.read_csv('Archive/combinedValData/valMELD.csv', encoding='latin1')
+
     print(f"Train data shape: {train_data.shape}")
     print(f"Validation data shape: {validation_data.shape}")
 
@@ -181,8 +205,11 @@ def get_data():
     # Text preprocessing
     tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
 
-    train_dataset = MultimodalDataset(train_data, transform, tokenizer, 'Archive/combinedTrainData/processedFrames')
-    validation_dataset = MultimodalDataset(validation_data, transform, tokenizer, 'Archive/combinedValData/processedFrames')
+    #train_dataset = MultimodalDataset(train_data, transform, tokenizer, 'Archive/combinedTrainData/processedFrames')
+    #validation_dataset = MultimodalDataset(validation_data, transform, tokenizer, 'Archive/combinedValData/processedFrames')
+
+    train_dataset = MultimodalDataset(train_data, transform, tokenizer, 'Archive/combinedValData/processedFrames')
+    validation_dataset = MultimodalDataset(validation_data, transform, tokenizer, 'Archive/combinedTrainData/processedFrames')
 
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(validation_dataset)}")
@@ -202,17 +229,17 @@ def train_model(train_dataloader, validation_dataloader, criterion):
 
     optimizer = AdamW([
         # ResNet layers
-        {'params': model.image_model.resnet.layer3.parameters(), 'lr': 1e-6},
-        {'params': model.image_model.resnet.layer4.parameters(), 'lr': 1e-6},
+        {'params': model.image_model.resnet.layer3.parameters(), 'lr': 1e-5},
+        {'params': model.image_model.resnet.layer4.parameters(), 'lr': 1e-5},
         {'params': model.image_model.resnet.fc.parameters(), 'lr': 1e-4},
 
         # BERT layers
-        {'params': model.text_model.bert.encoder.layer[-4:].parameters(), 'lr': 1e-6},
+        {'params': model.text_model.bert.encoder.layer[-4:].parameters(), 'lr': 1e-5},
         {'params': model.text_model.fc.parameters(), 'lr': 1e-4},
 
         # Fusion classifier
         {'params': model.classifier.parameters(), 'lr': 1e-4}
-    ], weight_decay=1e-4)
+    ], weight_decay=1e-3)
     
     train_loss = []
     val_loss = []
@@ -252,11 +279,14 @@ def train_model(train_dataloader, validation_dataloader, criterion):
         else:
             count += 1
 
-        if count >= patience:
-            print(f"Early stopping at epoch {epoch+1}")
-            break
+        # if count >= patience:
+        #     print(f"Early stopping at epoch {epoch+1}")
+        #     break
 
     plot_results(train_loss, val_loss)
+    # Save the best model
+    torch.save(best_model.state_dict(), 'best_model.pth')
+
 
 def plot_results(train_loss, val_loss):
     plt.plot(train_loss, label='Training Loss')
